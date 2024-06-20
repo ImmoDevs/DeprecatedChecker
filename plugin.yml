@@ -1,0 +1,6 @@
+name: DeprecatedChecker
+main: DeprecatedChecker\Main
+version: 1.0.0
+api: [5.0.0]
+author: ImmoDevs
+description: Detects and logs deprecated warnings from other plugins
