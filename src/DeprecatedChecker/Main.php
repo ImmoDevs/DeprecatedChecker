@@ -4,64 +4,41 @@ namespace DeprecatedChecker;
 
 use pocketmine\plugin\PluginBase;
 use pocketmine\utils\Config;
+use pocketmine\utils\TextFormat;
+use pocketmine\Server;
 
 class Main extends PluginBase
 {
-    private Config $deprecatedConfig;
+    private array $deprecatedFiles = [];
+    private array $warningHashes = [];
+    private string $dataPath;
+    private Config $warningIndex;
 
     public function onEnable(): void
     {
-        @mkdir($this->getDataFolder());
-        $this->deprecatedConfig = new Config(
-            $this->getDataFolder() . "deprecated.yml",
-            Config::YAML
-        );
+        $this->dataPath = $this->getDataFolder();
+        @mkdir($this->dataPath);
+        @mkdir($this->dataPath . "logs/");
 
-        set_error_handler([$this, "handleDeprecationWarnings"], E_DEPRECATED);
+        // Load warning index
+        $this->warningIndex = new Config($this->dataPath . "warning_index.json", Config::JSON);
+        $this->warningHashes = $this->warningIndex->getAll();
+
+        // Set error handler for deprecated warnings
+        set_error_handler([$this, "handleDeprecationWarnings"], E_DEPRECATED | E_USER_DEPRECATED);
+
+        $this->getLogger()->info(TextFormat::GREEN . "DeprecatedChecker has been enabled!");
     }
 
-    public function handleDeprecationWarnings(
-        int $errno,
-        string $errstr,
-        string $errfile,
-        int $errline
-    ): void {
-        if ($errno === E_DEPRECATED) {
-            $pluginName = $this->extractPluginName($errfile);
-
-            if ($pluginName === null) {
-                $pluginName = "UnknownPlugin";
+    private function getPluginFromFilePath(string $filePath): string
+    {
+        foreach (Server::getInstance()->getPluginManager()->getPlugins() as $plugin) {
+            if (strpos($filePath, $plugin->getFile()) !== false) {
+                return $plugin->getName();
             }
-
-            $existingEntries = $this->deprecatedConfig->getAll();
-            if (isset($existingEntries[$pluginName])) {
-                foreach ($existingEntries[$pluginName] as $entry) {
-                    if (
-                        $entry["message"] === $errstr &&
-                        $entry["file"] === $errfile &&
-                        $entry["line"] === $errline
-                    ) {
-                        return;
-                    }
-                }
-            }
-
-            $entry = [
-                "message" => $errstr,
-                "file" => $errfile,
-                "line" => $errline,
-            ];
-
-            if (!isset($existingEntries[$pluginName])) {
-                $existingEntries[$pluginName] = [];
-            }
-
-            $existingEntries[$pluginName][] = $entry;
-            $this->deprecatedConfig->setAll($existingEntries);
-            $this->deprecatedConfig->save();
-
-            $this->getLogger()->info("§o§aDeprecated warning detected and saved.");
         }
+        
+        return $this->extractPluginName($filePath) ?? "Unknown-Plugin";
     }
 
     private function extractPluginName(string $filePath): ?string
@@ -74,5 +51,56 @@ class Main extends PluginBase
         }
 
         return null;
+    }
+
+    private function createLogFileForPlugin(string $pluginName): string
+    {
+        $logFilePath = $this->dataPath . "logs/" . $this->sanitizeFileName($pluginName) . ".log";
+        if (!file_exists($logFilePath)) {
+            file_put_contents($logFilePath, "# Deprecation logs for {$pluginName}\n# Format: [Timestamp] Message (File:Line)\n\n");
+        }
+        return $logFilePath;
+    }
+
+    private function sanitizeFileName(string $filename): string
+    {
+        return preg_replace('/[^a-zA-Z0-9_\-]/', '_', $filename);
+    }
+
+    public function handleDeprecationWarnings(int $errno, string $errstr, string $errfile, int $errline): bool
+    {
+        if (!(error_reporting() & $errno)) {
+            return false;
+        }
+
+        if ($errno === E_DEPRECATED || $errno === E_USER_DEPRECATED) {
+            $pluginName = $this->getPluginFromFilePath($errfile);
+            $warningHash = md5($errstr . '|' . $errfile . '|' . $errline);
+
+            if (isset($this->warningHashes[$pluginName]) && in_array($warningHash, $this->warningHashes[$pluginName])) {
+                return false;
+            }
+
+            $logFile = $this->createLogFileForPlugin($pluginName);
+            $this->warningHashes[$pluginName][] = $warningHash;
+            $this->warningIndex->set($pluginName, $this->warningHashes[$pluginName]);
+            $this->warningIndex->save();
+
+            $logEntry = "[" . date('Y-m-d H:i:s') . "] {$errstr} ({$errfile}:{$errline})\n";
+            file_put_contents($logFile, $logEntry, FILE_APPEND);
+
+            $this->getLogger()->info(TextFormat::YELLOW . "Deprecation warning in " .
+                TextFormat::AQUA . $pluginName . TextFormat::RESET .
+                ": " . $errstr . " at " . basename($errfile) . ":{$errline} " .
+                TextFormat::GREEN . "(saved)");
+        }
+
+        return false;
+    }
+
+    public function onDisable(): void
+    {
+        restore_error_handler();
+        $this->warningIndex->save();
     }
 }
